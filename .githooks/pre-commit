@@ -1,0 +1,84 @@
+#!/bin/sh
+# pre-commit — formatting and secrets, against the INDEX.
+#
+# Source: duizendstra-com/dui-alexandria blueprints/githooks/pre-commit.
+# Adopted for the jasper ship 2026-09-20; see jdu-canon
+# rulings/2026-09-20-the-jasper-repo-floor.md. One file, every jdu-* repo —
+# the gofmt block is inert in a repo with no Go, so there is no per-repo
+# variant to keep in sync.
+#
+# Fast checks only. Anything that costs a compile belongs in pre-push, because
+# a commit happens far more often than a push and a slow gate is a gate people
+# learn to skip.
+#
+# Everything here reads the INDEX — `git show ":$f"`, not `cat "$f"`. Staged
+# content and disk are not the same bytes, and the index is what is about to
+# become a commit.
+#
+# `git commit --no-verify` skips this. It stops the ordinary mistake, not a
+# determined commit.
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+
+fail=0
+
+# -z keeps filenames with spaces intact; newlines in filenames are unsupported.
+while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  git show ":$file" > "$TMP" 2>/dev/null || continue
+
+  # --- 1. Formatting: staged .go files must be gofmt-clean ---
+  case "$file" in
+    *.go)
+      if command -v gofmt >/dev/null 2>&1; then
+        if [ -n "$(gofmt -l "$TMP" 2>/dev/null)" ]; then
+          printf '❌ Needs formatting (run gofmt -w): %s\n' "$file"
+          fail=1
+        fi
+      fi
+      ;;
+  esac
+
+  # --- 2. Secret scan: refuse committed credentials ---
+  #
+  # Token PREFIXES only. This catches a pasted credential; it does not catch a
+  # billing account, an org id, a hostname or a customer name.
+  if grep -qE 'gh[pousr]_[A-Za-z0-9]{36,}' "$TMP"; then
+    printf '🔑 GitHub token in: %s\n' "$file"; fail=1
+  fi
+  if grep -qE 'github_pat_[A-Za-z0-9_]{36,}' "$TMP"; then
+    printf '🔑 GitHub fine-grained PAT in: %s\n' "$file"; fail=1
+  fi
+  if grep -qE 'AIza[A-Za-z0-9_-]{35}' "$TMP"; then
+    printf '🔑 Google API key in: %s\n' "$file"; fail=1
+  fi
+  if grep -qE 'AKIA[A-Z0-9]{16}' "$TMP"; then
+    printf '🔑 AWS access key in: %s\n' "$file"; fail=1
+  fi
+  # -{5} rather than five literal dashes so this script never matches itself.
+  # Keep that property when extending the list.
+  if grep -qE -- '-{5}BEGIN.*PRIVATE KEY' "$TMP"; then
+    printf '🔑 Private key in: %s\n' "$file"; fail=1
+  fi
+  # Two markers, not one. A real key file carries the type line AND a
+  # private_key field; a document that merely quotes the type line does not.
+  # Measured 2026-09-20 rather than reasoned: the single-pattern form refused
+  # the canon ruling that describes this hook, on its own first commit.
+  if grep -qE '"type"[[:space:]]*:[[:space:]]*"service_account"' "$TMP" \
+     && grep -qE '"private_key"[[:space:]]*:' "$TMP"; then
+    printf '🔑 GCP service-account key in: %s\n' "$file"; fail=1
+  fi
+done <<EOF
+$(git diff --cached --name-only -z --diff-filter=ACM | tr '\0' '\n')
+EOF
+
+if [ "$fail" -ne 0 ]; then
+  echo ""
+  echo "❌ Commit refused. Fix the above and re-stage."
+  exit 1
+fi

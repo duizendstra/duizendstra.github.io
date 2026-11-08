@@ -1,0 +1,33 @@
+#!/bin/sh
+# commit-msg — Conventional Commits.
+#
+# Source: duizendstra-com/dui-alexandria blueprints/githooks/commit-msg, taken
+# verbatim. Adopted for the jasper ship 2026-09-20; see jdu-canon
+# rulings/2026-09-20-the-jasper-repo-floor.md.
+#
+# https://www.conventionalcommits.org/
+#
+# The bypass list is the part worth keeping: git WRITES these messages itself,
+# so a hook without it refuses merges, reverts and autosquash — a gate that
+# fails on git's own output teaches people to pass --no-verify, and after that
+# it gates nothing at all.
+set -e
+
+MSG_FILE="$1"
+MSG=$(head -1 "$MSG_FILE")
+
+case "$MSG" in
+  "Merge "* | "Revert "* | "fixup! "* | "squash! "*) exit 0 ;;
+esac
+
+PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+'
+
+if ! echo "$MSG" | grep -Eq "$PATTERN"; then
+  echo "❌ Commit message must follow Conventional Commits:"
+  echo "   type(scope): description"
+  echo ""
+  echo "   Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+  echo ""
+  echo "   Got: $MSG"
+  exit 1
+fi
