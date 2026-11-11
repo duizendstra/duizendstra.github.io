@@ -1,0 +1,102 @@
+name: Hygiene
+
+# The floor every jdu-* repo shares: Conventional Commits and a credential scan
+# over the added lines of a pull request. Language-agnostic on purpose — a repo
+# that is nine markdown files gets the same gate as one that is thirty Go files,
+# because neither of these two checks is about a language.
+#
+# Lifted from bloem-bloemenzaak/blm-iris-core .github/workflows/quality-gate.yml
+# (the `hygiene` job). Adopted for the jasper ship 2026-09-20; see jdu-canon
+# rulings/2026-09-20-the-jasper-repo-floor.md.
+#
+# This is the DETECTOR. The gate is .githooks/, which runs before the objects
+# reach the server — a workflow can only report what is already pushed. Both
+# exist because the hook can be skipped with --no-verify and this cannot.
+#
+# It runs on PUSH as well as on pull_request, and that is the half that matters
+# here: work on this ship lands by pushing main. Counted 2026-09-20T07:06Z —
+# two pull requests exist across the whole ship, both in jdu-rig, both merged
+# 2026-09-10; the other eight repos have none, ever. So the PR-only form lifted
+# from blm-iris-core was SKIPPED in 1s on every push — a detector that detected
+# nothing.
+#
+# ⚠ The first version of this comment said the ship "has never opened a pull
+# request". That was never true — it was asserted, not counted. The conclusion
+# survived the correction, and that is the trap: a wrong premise that happens to
+# reach the right gate is still wrong, and the next person to reason from it
+# lands somewhere else. Corrected 2026-09-20 — see jdu-canon
+# rulings/2026-09-20-seats-on-jasper.md § Measurement discipline.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: hygiene-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: Commit hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Resolve the range
+        id: range
+        run: |
+          # On a pull request the base is the merge target. On a push it is the
+          # ref's previous tip — which is all-zeros for a new branch, and gone
+          # after a force-push or a prune. Both fall back to HEAD's parent, and
+          # a root commit falls back to the empty tree, so this always resolves
+          # to something scannable rather than to an empty range that passes.
+          base="${{ github.event.pull_request.base.sha }}"
+          [ -n "$base" ] || base="${{ github.event.before }}"
+          if [ -z "$base" ] \
+             || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            if git rev-parse -q --verify HEAD^ >/dev/null; then
+              base=$(git rev-parse HEAD^)
+              echo "No usable base — falling back to HEAD^ ($base)."
+            else
+              base=4b825dc642cb6eb9a060e54bf8d69288fbee4904  # the empty tree
+              echo "Root commit — scanning against the empty tree."
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Conventional Commits
+        run: |
+          base="${{ steps.range.outputs.base }}"
+          bad=0
+          for sha in $(git rev-list "$base"..HEAD 2>/dev/null || git rev-list -1 HEAD); do
+            msg=$(git log -1 --format=%s "$sha")
+            case "$msg" in
+              "Merge "*|"Revert "*|"fixup! "*|"squash! "*) continue ;;
+            esac
+            if ! echo "$msg" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+'; then
+              echo "❌ $sha: $msg"
+              bad=1
+            fi
+          done
+          exit $bad
+      - name: Secret scan (added lines)
+        run: |
+          base="${{ steps.range.outputs.base }}"
+          added=$(git diff "$base" HEAD | grep -E '^\+' || true)
+          # -{5} instead of five literal dashes so this never matches itself.
+          if printf '%s\n' "$added" | grep -qE 'gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{36,}|AIza[A-Za-z0-9_-]{35}|AKIA[A-Z0-9]{16}|-{5}BEGIN.*PRIVATE KEY'; then
+            echo "🔑 Potential credential in the diff."
+            exit 1
+          fi
+          # Two markers, not one. A service-account key adds the type line AND a
+          # private_key field; prose that quotes the type line adds only the one.
+          if printf '%s\n' "$added" | grep -qE '"type"[[:space:]]*:[[:space:]]*"service_account"' \
+             && printf '%s\n' "$added" | grep -qE '"private_key"[[:space:]]*:'; then
+            echo "🔑 GCP service-account key in the diff."
+            exit 1
+          fi
